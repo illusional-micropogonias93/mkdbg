@@ -1,6 +1,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -24,6 +25,8 @@
 #define MAX_REPOS 16
 #define MAX_NAME 128
 #define MAX_VALUE 1024
+#define MAX_ATTACH_BREAKPOINTS 16
+#define MAX_ATTACH_COMMANDS 16
 
 typedef struct {
   char name[MAX_NAME];
@@ -119,6 +122,19 @@ typedef struct {
   int render_once;
   int dry_run;
 } WatchOptions;
+
+typedef struct {
+  const char *repo;
+  const char *target;
+  const char *port;
+  const char *breakpoints[MAX_ATTACH_BREAKPOINTS];
+  size_t breakpoint_count;
+  const char *gdb_commands[MAX_ATTACH_COMMANDS];
+  size_t gdb_command_count;
+  double server_wait_s;
+  int batch;
+  int dry_run;
+} AttachOptions;
 
 typedef struct {
   char id[MAX_NAME];
@@ -730,7 +746,6 @@ static void print_shell_arg(FILE *f, const char *arg)
 static int run_process(char *const argv[], const char *cwd, int dry_run)
 {
   pid_t pid;
-  int status;
   size_t i;
 
   printf("[mkdbg] cwd=%s\n", cwd);
@@ -759,9 +774,53 @@ static int run_process(char *const argv[], const char *cwd, int dry_run)
     fprintf(stderr, "error: exec failed for %s: %s\n", argv[0], strerror(errno));
     _exit(127);
   }
-  if (waitpid(pid, &status, 0) < 0) {
-    die("waitpid failed: %s", strerror(errno));
+  {
+    int status;
+    if (waitpid(pid, &status, 0) < 0) {
+      die("waitpid failed: %s", strerror(errno));
+    }
+    if (WIFEXITED(status)) {
+      return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+      return 128 + WTERMSIG(status);
+    }
   }
+  return 1;
+}
+
+static void print_command_label(const char *label, char *const argv[])
+{
+  size_t i;
+
+  printf("[mkdbg] %s=", label);
+  for (i = 0U; argv[i] != NULL; ++i) {
+    if (i != 0U) {
+      fputc(' ', stdout);
+    }
+    print_shell_arg(stdout, argv[i]);
+  }
+  fputc('\n', stdout);
+}
+
+static void sleep_seconds(double seconds)
+{
+  struct timespec req;
+
+  if (seconds <= 0.0) {
+    return;
+  }
+  req.tv_sec = (time_t)seconds;
+  req.tv_nsec = (long)((seconds - (double)req.tv_sec) * 1000000000.0);
+  if (req.tv_nsec < 0L) {
+    req.tv_nsec = 0L;
+  }
+  while (nanosleep(&req, &req) != 0 && errno == EINTR) {
+  }
+}
+
+static int wait_status_to_rc(int status)
+{
   if (WIFEXITED(status)) {
     return WEXITSTATUS(status);
   }
@@ -769,6 +828,72 @@ static int run_process(char *const argv[], const char *cwd, int dry_run)
     return 128 + WTERMSIG(status);
   }
   return 1;
+}
+
+static pid_t spawn_process(char *const argv[], const char *cwd)
+{
+  pid_t pid = fork();
+
+  if (pid < 0) {
+    die("fork failed: %s", strerror(errno));
+  }
+  if (pid == 0) {
+    if (chdir(cwd) != 0) {
+      fprintf(stderr, "error: chdir failed: %s\n", strerror(errno));
+      _exit(127);
+    }
+    execvp(argv[0], argv);
+    fprintf(stderr, "error: exec failed for %s: %s\n", argv[0], strerror(errno));
+    _exit(127);
+  }
+  return pid;
+}
+
+static int wait_for_pid(pid_t pid)
+{
+  int status;
+  if (waitpid(pid, &status, 0) < 0) {
+    die("waitpid failed: %s", strerror(errno));
+  }
+  return wait_status_to_rc(status);
+}
+
+static int try_reap_pid(pid_t pid, int *rc)
+{
+  int status;
+  pid_t got = waitpid(pid, &status, WNOHANG);
+
+  if (got == 0) {
+    return 0;
+  }
+  if (got < 0) {
+    if (errno == ECHILD) {
+      *rc = 1;
+      return 1;
+    }
+    die("waitpid failed: %s", strerror(errno));
+  }
+  *rc = wait_status_to_rc(status);
+  return 1;
+}
+
+static void terminate_pid(pid_t pid)
+{
+  int rc = 0;
+  int i;
+
+  if (try_reap_pid(pid, &rc)) {
+    return;
+  }
+  kill(pid, SIGTERM);
+  for (i = 0; i < 20; ++i) {
+    sleep_seconds(0.1);
+    if (try_reap_pid(pid, &rc)) {
+      return;
+    }
+  }
+  kill(pid, SIGKILL);
+  (void)wait_for_pid(pid);
 }
 
 static int command_program(const char *command, char *out, size_t out_size)
@@ -863,7 +988,7 @@ static int command_available(const char *command)
 static void usage(void)
 {
   printf("mkdbg-native %s\n", MKDBG_NATIVE_VERSION);
-  printf("usage: mkdbg-native [--version] <init|doctor|repo|target|incident|capture|watch> [options]\n");
+  printf("usage: mkdbg-native [--version] <init|doctor|repo|target|incident|capture|watch|attach> [options]\n");
 }
 
 static void init_default_repo_name(char *out, size_t out_size)
@@ -1422,6 +1547,131 @@ static int cmd_watch(const WatchOptions *opts)
   return run_process(argv, repo_root, opts->dry_run);
 }
 
+static int cmd_attach(const AttachOptions *opts)
+{
+  char config_path[PATH_MAX];
+  char repo_root[PATH_MAX];
+  char elf_path[PATH_MAX];
+  char openocd_cfg[PATH_MAX];
+  char target_command[MAX_VALUE];
+  const char *repo_name;
+  const RepoConfig *repo;
+  const char *gdb_bin;
+  const char *gdb_target;
+  MkdbgConfig config;
+  char *openocd_argv[8];
+  char *gdb_argv[2 + 1 + 2 + (2 * MAX_ATTACH_BREAKPOINTS) + (2 * MAX_ATTACH_COMMANDS) + 1];
+  char *shell_argv[4];
+  int openocd_argc = 0;
+  int gdb_argc = 0;
+  pid_t server_pid;
+  int rc = 1;
+  int server_rc = 1;
+  size_t i;
+
+  if (find_config_upward(config_path, sizeof(config_path)) != 0) {
+    die("missing %s; run `mkdbg init` first", CONFIG_NAME);
+  }
+  if (load_config_file(config_path, &config) != 0) {
+    die("invalid config: %s", config_path);
+  }
+  resolve_repo_name(&config, opts->repo, opts->target, &repo_name);
+  repo = find_repo_const(&config, repo_name);
+  if (repo == NULL) {
+    die("repo `%s` not found in %s", repo_name, config_path);
+  }
+  resolve_repo_root(config_path, repo, repo_root, sizeof(repo_root));
+
+  if (repo->attach_cmd[0] != '\0') {
+    if (opts->breakpoint_count > 0U || opts->gdb_command_count > 0U || opts->batch) {
+      die("attach_cmd cannot be combined with --break, --command, or --batch");
+    }
+    shell_argv[0] = "/bin/sh";
+    shell_argv[1] = "-lc";
+    shell_argv[2] = (char *)repo->attach_cmd;
+    shell_argv[3] = NULL;
+    return run_process(shell_argv, repo_root, opts->dry_run);
+  }
+
+  if (repo->elf_path[0] == '\0') {
+    die("repo `%s` has no `elf_path` configured", repo_name);
+  }
+  if (repo->openocd_cfg[0] == '\0' && repo->openocd_server_cmd[0] == '\0') {
+    die("repo `%s` has no `openocd_cfg` configured", repo_name);
+  }
+
+  resolve_repo_file(config_path, repo, repo->elf_path, elf_path, sizeof(elf_path));
+  if (!path_exists(elf_path)) {
+    die("repo `%s` is missing elf_path: %s", repo_name, elf_path);
+  }
+
+  if (repo->openocd_server_cmd[0] != '\0') {
+    shell_argv[0] = "/bin/sh";
+    shell_argv[1] = "-lc";
+    shell_argv[2] = (char *)repo->openocd_server_cmd;
+    shell_argv[3] = NULL;
+  } else {
+    resolve_repo_file(config_path, repo, repo->openocd_cfg, openocd_cfg, sizeof(openocd_cfg));
+    if (!path_exists(openocd_cfg)) {
+      die("repo `%s` is missing openocd_cfg: %s", repo_name, openocd_cfg);
+    }
+    openocd_argv[openocd_argc++] = "openocd";
+    openocd_argv[openocd_argc++] = "-f";
+    openocd_argv[openocd_argc++] = openocd_cfg;
+    openocd_argv[openocd_argc++] = "-c";
+    openocd_argv[openocd_argc++] = "gdb_port 3333; init; reset halt";
+    openocd_argv[openocd_argc] = NULL;
+  }
+
+  gdb_bin = repo->gdb[0] != '\0' ? repo->gdb : "arm-none-eabi-gdb";
+  gdb_target = repo->gdb_target[0] != '\0' ? repo->gdb_target : "localhost:3333";
+  gdb_argv[gdb_argc++] = (char *)gdb_bin;
+  gdb_argv[gdb_argc++] = elf_path;
+  if (opts->batch) {
+    gdb_argv[gdb_argc++] = "-batch";
+  }
+  snprintf(target_command, sizeof(target_command), "target extended-remote %s", gdb_target);
+  gdb_argv[gdb_argc++] = "-ex";
+  gdb_argv[gdb_argc++] = target_command;
+  for (i = 0U; i < opts->breakpoint_count; ++i) {
+    static char breakpoint_commands[MAX_ATTACH_BREAKPOINTS][MAX_VALUE];
+    snprintf(breakpoint_commands[i], sizeof(breakpoint_commands[i]), "break %s", opts->breakpoints[i]);
+    gdb_argv[gdb_argc++] = "-ex";
+    gdb_argv[gdb_argc++] = breakpoint_commands[i];
+  }
+  for (i = 0U; i < opts->gdb_command_count; ++i) {
+    gdb_argv[gdb_argc++] = "-ex";
+    gdb_argv[gdb_argc++] = (char *)opts->gdb_commands[i];
+  }
+  gdb_argv[gdb_argc] = NULL;
+
+  printf("[mkdbg] cwd=%s\n", repo_root);
+  if (repo->openocd_server_cmd[0] != '\0') {
+    printf("[mkdbg] openocd=%s\n", repo->openocd_server_cmd);
+  } else {
+    print_command_label("openocd", openocd_argv);
+  }
+  print_command_label("gdb", gdb_argv);
+  if (opts->dry_run) {
+    return 0;
+  }
+
+  if (repo->openocd_server_cmd[0] != '\0') {
+    server_pid = spawn_process(shell_argv, repo_root);
+  } else {
+    server_pid = spawn_process(openocd_argv, repo_root);
+  }
+
+  sleep_seconds(opts->server_wait_s);
+  if (try_reap_pid(server_pid, &server_rc)) {
+    return server_rc;
+  }
+
+  rc = run_process(gdb_argv, repo_root, 0);
+  terminate_pid(server_pid);
+  return rc;
+}
+
 static int parse_init_args(int argc, char **argv, InitOptions *opts)
 {
   int i;
@@ -1651,6 +1901,63 @@ static int parse_watch_args(int argc, char **argv, WatchOptions *opts)
   return 0;
 }
 
+static int parse_attach_args(int argc, char **argv, AttachOptions *opts)
+{
+  int i;
+  memset(opts, 0, sizeof(*opts));
+  opts->server_wait_s = 1.2;
+
+  for (i = 0; i < argc; ++i) {
+    if (strcmp(argv[i], "--target") == 0) {
+      if (i + 1 >= argc) {
+        die("missing value for --target");
+      }
+      opts->target = argv[++i];
+    } else if (strcmp(argv[i], "--port") == 0) {
+      if (i + 1 >= argc) {
+        die("missing value for --port");
+      }
+      opts->port = argv[++i];
+    } else if (strcmp(argv[i], "--break") == 0) {
+      if (i + 1 >= argc) {
+        die("missing value for --break");
+      }
+      if (opts->breakpoint_count >= MAX_ATTACH_BREAKPOINTS) {
+        die("too many --break arguments");
+      }
+      opts->breakpoints[opts->breakpoint_count++] = argv[++i];
+    } else if (strcmp(argv[i], "--command") == 0) {
+      if (i + 1 >= argc) {
+        die("missing value for --command");
+      }
+      if (opts->gdb_command_count >= MAX_ATTACH_COMMANDS) {
+        die("too many --command arguments");
+      }
+      opts->gdb_commands[opts->gdb_command_count++] = argv[++i];
+    } else if (strcmp(argv[i], "--batch") == 0) {
+      opts->batch = 1;
+    } else if (strcmp(argv[i], "--dry-run") == 0) {
+      opts->dry_run = 1;
+    } else if (strcmp(argv[i], "--server-wait-s") == 0) {
+      char *end = NULL;
+      if (i + 1 >= argc) {
+        die("missing value for --server-wait-s");
+      }
+      opts->server_wait_s = strtod(argv[++i], &end);
+      if (end == NULL || *end != '\0' || opts->server_wait_s < 0.0) {
+        die("invalid value for --server-wait-s: %s", argv[i]);
+      }
+    } else if (argv[i][0] == '-') {
+      die("unknown attach argument: %s", argv[i]);
+    } else if (opts->repo == NULL) {
+      opts->repo = argv[i];
+    } else {
+      die("attach accepts at most one repo name");
+    }
+  }
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
   if (argc == 2 && strcmp(argv[1], "--version") == 0) {
@@ -1734,6 +2041,12 @@ int main(int argc, char **argv)
     WatchOptions opts;
     parse_watch_args(argc - 2, argv + 2, &opts);
     return cmd_watch(&opts);
+  }
+
+  if (strcmp(argv[1], "attach") == 0) {
+    AttachOptions opts;
+    parse_attach_args(argc - 2, argv + 2, &opts);
+    return cmd_attach(&opts);
   }
 
   die("unknown command: %s", argv[1]);

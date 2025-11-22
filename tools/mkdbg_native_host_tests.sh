@@ -19,6 +19,8 @@ CAPTURE_STDOUT="${TMP_DIR}/capture.stdout"
 CAPTURE_INCIDENT_STDOUT="${TMP_DIR}/capture-incident.stdout"
 WATCH_DRY_OUT="${TMP_DIR}/watch-dry.out"
 WATCH_RENDER_OUT="${TMP_DIR}/watch-render.out"
+ATTACH_DRY_OUT="${TMP_DIR}/attach-dry.out"
+ATTACH_ERR_OUT="${TMP_DIR}/attach.err"
 CONFIG_PATH="${TMP_DIR}/.mkdbg.toml"
 
 cleanup() {
@@ -365,6 +367,50 @@ checks = [
 for item in checks:
     if item not in text:
         raise SystemExit(f"missing expected watch render text: {item}")
+PY
+
+PATH="${BIN_DIR}:${PATH}" "${ROOT_DIR}/build/mkdbg-native" attach --target microkernel \
+  --break main \
+  --command continue \
+  --command bt \
+  --batch \
+  --dry-run > "${ATTACH_DRY_OUT}"
+python3 - "${ATTACH_DRY_OUT}" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+checks = [
+    "[mkdbg] cwd=",
+    "[mkdbg] openocd=openocd -f ",
+    "[mkdbg] gdb=arm-none-eabi-gdb ",
+    "MicroKernel_MPU.elf",
+    "-batch",
+    "-ex 'target extended-remote localhost:3333'",
+    "-ex 'break main'",
+    "-ex continue",
+    "-ex bt",
+]
+for item in checks:
+    if item not in text:
+        raise SystemExit(f"missing expected attach dry-run output: {item}")
+PY
+
+PATH="${BIN_DIR}:${PATH}" "${ROOT_DIR}/build/mkdbg-native" target add tahoe \
+  --path . \
+  --attach-cmd "gdb build/tahoe.elf" >/dev/null
+if PATH="${BIN_DIR}:${PATH}" "${ROOT_DIR}/build/mkdbg-native" attach tahoe --dry-run --break main > /dev/null 2> "${ATTACH_ERR_OUT}"; then
+  echo "mkdbg_native_host_tests: expected attach_cmd override to reject scripted flags" >&2
+  exit 1
+fi
+python3 - "${ATTACH_ERR_OUT}" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+needle = "attach_cmd cannot be combined with --break, --command, or --batch"
+if needle not in text:
+    raise SystemExit(f"missing expected attach error text: {needle}")
 PY
 
 popd >/dev/null
