@@ -9,6 +9,7 @@ add_executable(mkdbg_native_host
   tools/mkdbg_util.c
   tools/mkdbg_process.c
   tools/mkdbg_config.c
+  tools/mkdbg_incident.c
 )
 set_target_properties(mkdbg_native_host PROPERTIES
   OUTPUT_NAME mkdbg-native

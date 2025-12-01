@@ -255,4 +255,14 @@ void current_incident_path_from_config(const char *config_path, char *out, size_
 void incident_meta_path(const char *incident_dir, char *out, size_t out_size);
 int resolve_repo_name(const MkdbgConfig *config, const char *repo, const char *target, const char **out_name);
 
+/* ---- incident.c ---- */
+void sanitize_slug(const char *input, char *out, size_t out_size);
+int load_current_incident_id(const char *config_path, char *out, size_t out_size);
+int load_incident_metadata(const char *meta_path, IncidentMetadata *meta);
+int write_incident_metadata(const char *meta_path, const IncidentMetadata *meta, long closed_at);
+int load_current_incident_dir(const char *config_path, char *out, size_t out_size);
+int cmd_incident_open(const IncidentOpenOptions *opts);
+int cmd_incident_status(const IncidentStatusOptions *opts);
+int cmd_incident_close(void);
+
 #endif /* MKDBG_H */
