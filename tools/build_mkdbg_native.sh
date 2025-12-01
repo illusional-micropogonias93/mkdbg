@@ -38,7 +38,8 @@ mkdir -p "${BUILD_DIR}"
 
 cc -std=c99 -Wall -Wextra -Werror -O2 \
   -o "${OUT}" \
-  "${ROOT_DIR}/tools/mkdbg_native.c"
+  "${ROOT_DIR}/tools/mkdbg_native.c" \
+  "${ROOT_DIR}/tools/mkdbg_util.c"
 
 if [[ "${OUT_ARTIFACT}" != "${OUT}" ]]; then
   cp "${OUT}" "${OUT_ARTIFACT}"
