@@ -293,4 +293,10 @@ int cmd_git_new_branch(const GitOptions *opts);
 int cmd_git_worktree(const GitOptions *opts);
 int cmd_git_push_current(const GitOptions *opts);
 
+/* ---- probe.c ---- */
+int cmd_probe_action(const ProbeOptions *opts, const char *command);
+int cmd_probe_flash(const ProbeOptions *opts);
+int cmd_probe_read32(const ProbeOptions *opts);
+int cmd_probe_write32(const ProbeOptions *opts);
+
 #endif /* MKDBG_H */
