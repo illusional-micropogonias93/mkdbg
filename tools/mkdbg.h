@@ -281,4 +281,72 @@ int parse_action_args(int argc, char **argv, ActionOptions *opts);
 int parse_git_args(int argc, char **argv, GitOptions *opts);
 int parse_serial_args(int argc, char **argv, SerialOptions *opts);
 
+/* ---- git.c ---- */
+void git_resolve_repo_root(const GitOptions *opts,
+                           char *config_path,
+                           size_t config_path_size,
+                           char *repo_root,
+                           size_t repo_root_size);
+int cmd_git_status(const GitOptions *opts);
+int cmd_git_rev(const GitOptions *opts);
+int cmd_git_new_branch(const GitOptions *opts);
+int cmd_git_worktree(const GitOptions *opts);
+int cmd_git_push_current(const GitOptions *opts);
+
+/* ---- probe.c ---- */
+int cmd_probe_action(const ProbeOptions *opts, const char *command);
+int cmd_probe_flash(const ProbeOptions *opts);
+int cmd_probe_read32(const ProbeOptions *opts);
+int cmd_probe_write32(const ProbeOptions *opts);
+
+/* ---- action.c ---- */
+void build_action_context(const char *config_path,
+                          const char *repo_name,
+                          const RepoConfig *repo,
+                          const char *port,
+                          char *repo_root,
+                          size_t repo_root_size,
+                          char *elf_path,
+                          size_t elf_path_size,
+                          char *openocd_cfg,
+                          size_t openocd_cfg_size,
+                          char *snapshot_output,
+                          size_t snapshot_output_size,
+                          char *gdb_target,
+                          size_t gdb_target_size);
+void format_action_command(const char *template,
+                           const char *repo_name,
+                           const char *repo_root,
+                           const char *port,
+                           const char *elf_path,
+                           const char *openocd_cfg,
+                           const char *snapshot_output,
+                           const char *gdb_target,
+                           char *out,
+                           size_t out_size);
+int cmd_run(const RunOptions *opts);
+int cmd_configured_action(const ActionOptions *opts, const char *field, int needs_port);
+
+/* ---- serial.c ---- */
+speed_t baud_to_speed(int baud);
+const char *resolve_serial_port(const char *config_path,
+                                const MkdbgConfig *config,
+                                const SerialOptions *opts);
+int cmd_serial_tail(const SerialOptions *opts);
+int cmd_serial_send(const SerialOptions *opts);
+
+/* ---- core.c ---- */
+void init_default_repo_name(char *out, size_t out_size);
+int cmd_init(const InitOptions *opts);
+int cmd_doctor(const DoctorOptions *opts);
+void apply_repo_add_overrides(RepoConfig *repo, const RepoAddOptions *opts);
+int cmd_repo_add(const RepoAddOptions *opts);
+int cmd_repo_list(void);
+int cmd_repo_use(const NameCommandOptions *opts);
+
+/* ---- launcher.c ---- */
+int cmd_capture_bundle(const CaptureBundleOptions *opts);
+int cmd_watch(const WatchOptions *opts);
+int cmd_attach(const AttachOptions *opts);
+
 #endif /* MKDBG_H */
