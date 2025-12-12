@@ -29,6 +29,27 @@ target_compile_options(mkdbg_native_host PRIVATE
   -O2
 )
 
+# ── seam-analyze: host-side causal fault analysis tool ───────────────────────
+add_executable(seam_analyze_host
+  tools/mkdbg_seam.c
+  tools/seam/src/seam_analyze.c
+  tools/seam/src/seam_rules.c
+  tools/seam/src/seam_print.c
+)
+set_target_properties(seam_analyze_host PROPERTIES
+  OUTPUT_NAME seam-analyze
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+)
+target_compile_options(seam_analyze_host PRIVATE
+  -Wall
+  -Wextra
+  -Werror
+  -O2
+)
+target_include_directories(seam_analyze_host PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/tools/seam/include
+)
+
 set(VM32_MEM_SIZE "4096" CACHE STRING "VM32 memory size in bytes (256/1024/4096)")
 set(BOARD_UART_PORT "2" CACHE STRING "UART port for VCP (1/2/3)")
 set(BUILD_PROFILE "default" CACHE STRING "Build profile label embedded in firmware identity")
