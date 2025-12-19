@@ -168,6 +168,7 @@ target_compile_definitions(${PROJECT_NAME}.elf PRIVATE
   STM32F446xx
   VM32_MEM_SIZE=${VM32_MEM_SIZE}
   BOARD_UART_PORT=${BOARD_UART_PORT}
+  SEAM_RING_SIZE=8
 )
 
 target_compile_options(${PROJECT_NAME}.elf PRIVATE
