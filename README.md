@@ -1,11 +1,7 @@
-<p align="center">
-  <img src="docs/assets/logo.svg" alt="mkdbg" width="480"/>
-</p>
+<img src="docs/assets/logo.svg" alt="mkdbg" width="480"/>
 
-<p align="center">
-  <strong>UART-only crash diagnostics and fault triage for embedded systems.</strong><br>
-  No JTAG. No SWD probe. No OpenOCD. Connect a serial cable, run <code>mkdbg attach</code>.
-</p>
+**UART-only crash diagnostics and fault triage for embedded systems.**
+No JTAG. No SWD probe. No OpenOCD. Connect a serial cable, run `mkdbg attach`.
 
 ---
 
