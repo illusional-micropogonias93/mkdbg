@@ -50,27 +50,30 @@ target_compile_options(wire_crash_lib PRIVATE -Wall -Wextra -O2)
 
 # ── mkdbg-native: main CLI ────────────────────────────────────────────────────
 add_executable(mkdbg-native
-  host/main.c
-  host/util.c
-  host/process.c
-  host/config.c
-  host/incident.c
-  host/parse.c
-  host/core.c
-  host/launcher.c
-  host/git.c
-  host/probe.c
-  host/action.c
-  host/serial.c
-  host/seam.c
-  host/dashboard.c
-  host/wire.c
+  src/main.c
+  src/util.c
+  src/process.c
+  src/config.c
+  src/incident.c
+  src/parse.c
+  src/core.c
+  src/launcher.c
+  src/git.c
+  src/probe.c
+  src/action.c
+  src/serial.c
+  src/seam.c
+  src/dashboard.c
+  src/wire.c
+  arch/cortex_m.c
+  arch/arch_registry.c
   $<TARGET_OBJECTS:seam_lib>
   $<TARGET_OBJECTS:wire_crash_lib>
 )
 target_compile_options(mkdbg-native PRIVATE -Wall -Wextra -Werror -O2)
 target_include_directories(mkdbg-native PRIVATE
-  ${CMAKE_CURRENT_LIST_DIR}/host
+  ${CMAKE_CURRENT_LIST_DIR}/src
+  ${CMAKE_CURRENT_LIST_DIR}/arch
   ${CMAKE_CURRENT_LIST_DIR}/deps/seam/include
   ${CMAKE_CURRENT_LIST_DIR}/deps/wire/include
   ${CMAKE_CURRENT_LIST_DIR}/deps/wire/host
@@ -89,8 +92,8 @@ set_target_properties(mkdbg-native PROPERTIES
 
 # ── seam-analyze: standalone causal-chain analysis tool ──────────────────────
 add_executable(seam-analyze
-  host/seam_main.c
-  host/seam.c
+  src/seam_main.c
+  src/seam.c
   $<TARGET_OBJECTS:seam_lib>
 )
 target_compile_options(seam-analyze PRIVATE -Wall -Wextra -Werror -O2)
@@ -128,3 +131,16 @@ add_test(
 set_tests_properties(seam_analyze_kdi_cascade PROPERTIES
   PASS_REGULAR_EXPRESSION "VERDICT:"
 )
+
+# ── ctest: arch plugin registry ───────────────────────────────────────────────
+add_executable(arch_test
+  tests/arch_test.c
+  arch/cortex_m.c
+  arch/arch_registry.c
+)
+target_compile_options(arch_test PRIVATE -Wall -Wextra -Werror -O2)
+target_include_directories(arch_test PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/src
+  ${CMAKE_CURRENT_LIST_DIR}/arch
+)
+add_test(NAME arch_registry COMMAND arch_test)
