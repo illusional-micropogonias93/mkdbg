@@ -495,6 +495,12 @@ int parse_debug_args(int argc, char **argv, DebugOptions *opts)
     } else if (strcmp(argv[i], "--elf") == 0) {
       if (i + 1 >= argc) die("missing value for --elf");
       opts->elf_path = argv[++i];
+    } else if (strcmp(argv[i], "--arch") == 0) {
+      if (i + 1 >= argc) die("missing value for --arch");
+      opts->arch = argv[++i];
+    } else if (strcmp(argv[i], "--freertos-tcb-offset") == 0) {
+      if (i + 1 >= argc) die("missing value for --freertos-tcb-offset");
+      opts->freertos_name_offset = atoi(argv[++i]);
     } else if (argv[i][0] == '-') {
       die("unknown debug argument: %s", argv[i]);
     } else {

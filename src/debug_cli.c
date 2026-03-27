@@ -19,10 +19,14 @@
 #include "debug_tui.h"
 #include "dwarf.h"
 #include "wire_host.h"
+#include "arch.h"
 
 /* ── Session-scoped DWARF handle (NULL if no --elf provided) ─────────────── */
 
 static DwarfDBI *s_dbi = NULL;
+
+/* pcTaskName byte offset in TCB (default 52 per FreeRTOS 10.x standard config) */
+static int s_freertos_offset = 52;
 
 /* ── Breakpoint list ─────────────────────────────────────────────────────── */
 
@@ -33,6 +37,45 @@ typedef struct { int id; uint32_t addr; } Breakpoint;
 static Breakpoint s_bp[BP_MAX];
 static int        s_bp_count  = 0;
 static int        s_bp_nextid = 1;
+
+/* ── Watchpoint list (DWT) ───────────────────────────────────────────────── */
+
+#define WP_MAX 4  /* DWT comparator hardware limit */
+
+typedef struct { int id; uint32_t addr; WatchpointType type; } Watchpoint;
+
+static Watchpoint s_wp[WP_MAX];
+static int        s_wp_count  = 0;
+static int        s_wp_nextid = 1;
+
+static int wp_add(uint32_t addr, WatchpointType type)
+{
+    if (s_wp_count >= WP_MAX) return -1;
+    s_wp[s_wp_count].id   = s_wp_nextid++;
+    s_wp[s_wp_count].addr = addr;
+    s_wp[s_wp_count].type = type;
+    s_wp_count++;
+    return s_wp[s_wp_count - 1].id;
+}
+
+static int wp_remove(int id, uint32_t *addr_out)
+{
+    for (int i = 0; i < s_wp_count; i++) {
+        if (s_wp[i].id == id) {
+            *addr_out = s_wp[i].addr;
+            s_wp[i]   = s_wp[--s_wp_count];
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* ── Memory display list ─────────────────────────────────────────────────── */
+
+#define DISPLAY_MAX 8
+
+static uint32_t s_display[DISPLAY_MAX];
+static int      s_ndisplay = 0;
 
 static int bp_add(uint32_t addr)
 {
@@ -68,22 +111,40 @@ static const char *signal_name(int sig)
     }
 }
 
-static const char *reg_name(int i)
+/* ── FreeRTOS helpers ────────────────────────────────────────────────────── */
+
+/* Read the current FreeRTOS task name into name_out (max sz bytes).
+ * Returns 1 on success, 0 if FreeRTOS not detected or read failed. */
+static int read_freertos_task(DebugSession *s, char *name_out, size_t sz)
 {
-    static const char *names[17] = {
-        "r0","r1","r2","r3","r4","r5","r6","r7",
-        "r8","r9","r10","r11","r12","sp","lr","pc","xpsr"
-    };
-    return (i >= 0 && i < 17) ? names[i] : "??";
+    if (!s_dbi) return 0;
+
+    uint32_t sym_addr;
+    if (dwarf_sym_to_addr(s_dbi, "pxCurrentTCB", &sym_addr) != 0) return 0;
+
+    uint8_t ptr_buf[4];
+    if (debug_session_read_mem(s, sym_addr, 4, ptr_buf) != WIRE_OK) return 0;
+    uint32_t tcb = (uint32_t)ptr_buf[0]
+                 | (uint32_t)ptr_buf[1] << 8
+                 | (uint32_t)ptr_buf[2] << 16
+                 | (uint32_t)ptr_buf[3] << 24;
+    if (tcb == 0) return 0;
+
+    uint8_t name_buf[16];
+    if (debug_session_read_mem(s, tcb + (uint32_t)s_freertos_offset, 15, name_buf) != WIRE_OK)
+        return 0;
+    name_buf[15] = '\0';
+    snprintf(name_out, sz, "%s", (char *)name_buf);
+    return 1;
 }
 
 static void print_halt(DebugSession *s)
 {
     int sig = debug_session_last_signal(s);
     printf("Halted.  signal=%d (%s)", sig, signal_name(sig));
-    uint32_t regs[DEBUG_SESSION_NREGS];
+    uint32_t regs[DEBUG_SESSION_MAX_REGS];
     if (debug_session_read_regs(s, regs) == WIRE_OK) {
-        uint32_t pc = regs[15];
+        uint32_t pc = regs[debug_session_pc_reg(s)];
         printf("  pc=0x%08x", pc);
         if (s_dbi) {
             DwarfLocation loc;
@@ -91,6 +152,9 @@ static void print_halt(DebugSession *s)
                 printf("  %s:%d", loc.file, loc.line);
         }
     }
+    char task_name[32] = "";
+    if (read_freertos_task(s, task_name, sizeof(task_name)))
+        printf("  task=%s", task_name);
     printf("\n");
 }
 
@@ -126,9 +190,18 @@ static void trim_eol(char *s)
 
 static void do_break(DebugSession *s, const char *args)
 {
-    if (!*args) { printf("usage: break 0x<addr>\n"); return; }
+    if (!*args) { printf("usage: break 0x<addr> | break <symbol>\n"); return; }
 
-    uint32_t addr = parse_addr(args);
+    uint32_t addr;
+    if (args[0] == '0' && (args[1] == 'x' || args[1] == 'X')) {
+        addr = parse_addr(args);
+    } else if (s_dbi && dwarf_sym_to_addr(s_dbi, args, &addr) == 0) {
+        printf("(symbol '%s' = 0x%08x)\n", args, addr);
+    } else if (!s_dbi) {
+        printf("error: pass --elf to use symbol names\n"); return;
+    } else {
+        printf("error: symbol '%s' not found in ELF\n", args); return;
+    }
     if (debug_session_set_hw_breakpoint(s, addr) != WIRE_OK) {
         printf("error: could not set breakpoint (no free FPB comparator?)\n");
         return;
@@ -160,19 +233,16 @@ static void do_clear(DebugSession *s, const char *args)
 
 static void do_regs(DebugSession *s)
 {
-    uint32_t regs[DEBUG_SESSION_NREGS];
+    uint32_t regs[DEBUG_SESSION_MAX_REGS];
     if (debug_session_read_regs(s, regs) != WIRE_OK) {
         printf("error: failed to read registers\n");
         return;
     }
-    /* r0–r12: four per row */
-    for (int i = 0; i <= 12; i++) {
-        printf("%-4s 0x%08x", reg_name(i), regs[i]);
-        printf(((i % 4) == 3 || i == 12) ? "\n" : "   ");
+    int nregs = debug_session_nregs(s);
+    for (int i = 0; i < nregs; i++) {
+        printf("%-6s 0x%08x", debug_session_reg_name(s, i), regs[i]);
+        printf(((i % 4) == 3 || i == nregs - 1) ? "\n" : "   ");
     }
-    printf("sp   0x%08x   lr   0x%08x   pc   0x%08x\n",
-           regs[13], regs[14], regs[15]);
-    printf("xpsr 0x%08x\n", regs[16]);
 }
 
 static void do_mem(DebugSession *s, const char *args)
@@ -205,19 +275,93 @@ static void do_info_breakpoints(void)
         printf("%-4d 0x%08x\n", s_bp[i].id, s_bp[i].addr);
 }
 
+static void do_watch(DebugSession *s, const char *args, WatchpointType type)
+{
+    if (!*args) {
+        printf("usage: watch/rwatch/awatch 0x<addr>\n"); return;
+    }
+    uint32_t addr = parse_addr(args);
+    if (debug_session_set_watchpoint(s, addr, 1, type) != WIRE_OK) {
+        printf("error: could not set watchpoint (no free DWT comparator?)\n");
+        return;
+    }
+    int id = wp_add(addr, type);
+    if (id < 0) {
+        debug_session_clear_watchpoint(s, addr);
+        printf("error: watchpoint list full\n");
+        return;
+    }
+    const char *tname = (type == WATCHPOINT_WRITE)  ? "write"  :
+                        (type == WATCHPOINT_READ)   ? "read"   : "access";
+    printf("Watchpoint %d at 0x%08x (%s)\n", id, addr, tname);
+}
+
+static void do_delete_watch(DebugSession *s, const char *args)
+{
+    if (!*args) { printf("usage: delete watch <id>\n"); return; }
+    int id = atoi(args);
+    uint32_t addr;
+    if (wp_remove(id, &addr) != 0) {
+        printf("error: no watchpoint %d\n", id); return;
+    }
+    if (debug_session_clear_watchpoint(s, addr) != WIRE_OK)
+        printf("warning: target returned error clearing watchpoint\n");
+    else
+        printf("Watchpoint %d (0x%08x) cleared.\n", id, addr);
+}
+
+static void do_info_watchpoints(void)
+{
+    if (s_wp_count == 0) { printf("No watchpoints.\n"); return; }
+    printf("Num  Address     Type\n");
+    for (int i = 0; i < s_wp_count; i++) {
+        const char *t = (s_wp[i].type == WATCHPOINT_WRITE)  ? "write"  :
+                        (s_wp[i].type == WATCHPOINT_READ)   ? "read"   : "access";
+        printf("%-4d 0x%08x  %s\n", s_wp[i].id, s_wp[i].addr, t);
+    }
+}
+
+static void do_display(const char *args)
+{
+    if (!*args) { printf("usage: display 0x<addr>\n"); return; }
+    if (s_ndisplay >= DISPLAY_MAX) { printf("error: display list full\n"); return; }
+    s_display[s_ndisplay++] = parse_addr(args);
+    printf("display %d: 0x%08x\n", s_ndisplay, s_display[s_ndisplay - 1]);
+}
+
+static void do_undisplay(const char *args)
+{
+    if (!*args) { printf("usage: undisplay <id>\n"); return; }
+    int id = atoi(args) - 1;
+    if (id < 0 || id >= s_ndisplay) { printf("error: no display %d\n", id + 1); return; }
+    for (int i = id; i < s_ndisplay - 1; i++) s_display[i] = s_display[i + 1];
+    s_ndisplay--;
+    printf("display %d removed\n", id + 1);
+}
+
 static void print_help(void)
 {
     printf(
         "Commands:\n"
-        "  break 0x<addr>      set hardware breakpoint (FPBv1)\n"
-        "  clear <id>          clear breakpoint by number\n"
-        "  continue  (c)       resume execution; wait for next halt\n"
-        "  step      (s)       single-step one instruction\n"
-        "  regs                print all CPU registers\n"
-        "  mem 0x<addr> [len]  hexdump memory (default 16 bytes, max 256)\n"
-        "  info breakpoints    list active breakpoints\n"
-        "  tui                 TUI mode (PR 11)\n"
-        "  quit      (q)       resume MCU and exit\n"
+        "  break 0x<addr>           set hardware breakpoint (FPBv1)\n"
+        "  break <symbol>           set breakpoint at named function (requires --elf)\n"
+        "  clear <id>               clear breakpoint by number\n"
+        "  watch 0x<addr>           DWT write watchpoint\n"
+        "  rwatch 0x<addr>          DWT read watchpoint\n"
+        "  awatch 0x<addr>          DWT read+write watchpoint\n"
+        "  delete watch <id>        clear DWT watchpoint by number\n"
+        "  display 0x<addr>         add memory address to display list\n"
+        "  undisplay <id>           remove from display list\n"
+        "  continue  (c)            resume execution; wait for next halt\n"
+        "  step      (s)            single-step one instruction\n"
+        "  regs                     print all CPU registers\n"
+        "  mem 0x<addr> [len]       hexdump memory (default 16 bytes, max 256)\n"
+        "  info breakpoints         list active breakpoints\n"
+        "  info watchpoints         list active DWT watchpoints\n"
+        "  info display             list memory display addresses\n"
+        "  freertos current         show current FreeRTOS task name (requires --elf)\n"
+        "  tui                      TUI mode\n"
+        "  quit      (q)            resume MCU and exit\n"
     );
 }
 
@@ -231,7 +375,12 @@ int cmd_debug(const DebugOptions *opts)
     if (!port || !*port)
         die("debug requires --port; e.g. mkdbg debug --port /dev/ttyUSB0");
 
-    DebugSession *s = debug_session_open(port, baud);
+    const char     *arch_name = opts->arch ? opts->arch : "cortex-m";
+    const MkdbgArch *arch     = mkdbg_arch_find(arch_name);
+    if (!arch || !arch->live_debug)
+        die("arch '%s' does not support live debug", arch_name);
+
+    DebugSession *s = debug_session_open(port, baud, arch);
     if (!s) return 1;
 
     printf("mkdbg live debug  port=%s  baud=%d\n", port, baud);
@@ -249,9 +398,16 @@ int cmd_debug(const DebugOptions *opts)
 
     printf("Type 'help' for commands.\n\n");
 
+    /* Override default TCB offset if user supplied --freertos-tcb-offset */
+    if (opts->freertos_name_offset != 0)
+        s_freertos_offset = opts->freertos_name_offset;
+
     /* Reset state for this session */
     s_bp_count  = 0;
     s_bp_nextid = 1;
+    s_wp_count  = 0;
+    s_wp_nextid = 1;
+    s_ndisplay  = 0;
 
     char line[256];
     for (;;) {
@@ -282,11 +438,39 @@ int cmd_debug(const DebugOptions *opts)
             do_regs(s);
         } else if (strcmp(cmd, "mem") == 0) {
             do_mem(s, args);
+        } else if (strcmp(cmd, "watch") == 0) {
+            do_watch(s, args, WATCHPOINT_WRITE);
+        } else if (strcmp(cmd, "rwatch") == 0) {
+            do_watch(s, args, WATCHPOINT_READ);
+        } else if (strcmp(cmd, "awatch") == 0) {
+            do_watch(s, args, WATCHPOINT_ACCESS);
+        } else if (strcmp(cmd, "delete") == 0) {
+            char sub[16];
+            const char *rest = split_token(args, sub, sizeof(sub));
+            if (strcmp(sub, "watch") == 0) do_delete_watch(s, rest);
+            else printf("delete: unknown subcommand '%s'\n", sub);
+        } else if (strcmp(cmd, "display") == 0) {
+            do_display(args);
+        } else if (strcmp(cmd, "undisplay") == 0) {
+            do_undisplay(args);
         } else if (strcmp(cmd, "info") == 0) {
             char sub[32];
             split_token(args, sub, sizeof(sub));
             if (strcmp(sub, "breakpoints") == 0) do_info_breakpoints();
-            else printf("info: unknown subcommand '%s'\n", sub);
+            else if (strcmp(sub, "watchpoints") == 0) do_info_watchpoints();
+            else if (strcmp(sub, "display") == 0) {
+                if (s_ndisplay == 0) printf("No display addresses.\n");
+                else for (int i = 0; i < s_ndisplay; i++)
+                    printf("%d: 0x%08x\n", i + 1, s_display[i]);
+            } else printf("info: unknown subcommand '%s'\n", sub);
+        } else if (strcmp(cmd, "freertos") == 0) {
+            char task_name[32] = "";
+            if (read_freertos_task(s, task_name, sizeof(task_name)))
+                printf("current task: %s\n", task_name);
+            else if (!s_dbi)
+                printf("error: pass --elf to use FreeRTOS awareness\n");
+            else
+                printf("(pxCurrentTCB not found — not a FreeRTOS build?)\n");
         } else if (strcmp(cmd, "tui") == 0) {
             int ret = debug_tui_run(s, s_dbi);
             if (ret == TUI_QUIT) {
