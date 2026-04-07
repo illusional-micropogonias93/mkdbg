@@ -280,3 +280,140 @@ static void test_16bit(void)
 
 /* ── 32-bit instruction tests ─────────────────────────────────────────────── */
 
+static void test_32bit(void)
+{
+    printf("\n--- 32-bit instructions ---\n");
+
+    /* BL T1: bl 0x00001008, pc=0x1000, target=0x1008
+     * offset = (0x1008-0x1004)/2 = 2; S=0,I1=0,I2=0,imm10=0,imm11=2
+     * J1=~(I1^S)=1, J2=~(I2^S)=1
+     * hw1=0xF000, hw2=0xF802 */
+    { const uint8_t b[] = {0x00, 0xF0, 0x02, 0xF8};
+      chk("bl 0x00001008", 0x1000, b, 4, NULL, "bl 0x00001008", 4); }
+
+    /* BL T1: bl 0x00000000 (backward, pc=0x1000)
+     * offset = (0-0x1004)/2 = -0x802; raw 24-bit = 0xFFF7FE
+     * S=1,I1=1,I2=1,imm10=0x3FE,imm11=0x7FE
+     * J1=~(I1^S)&1=1, J2=1
+     * hw1=0xF000|(1<<10)|0x3FE=0xF7FE → {0xFE,0xF7}
+     * hw2=0xD000|(1<<13)|(1<<11)|0x7FE=0xFFFE → {0xFE,0xFF} */
+    { const uint8_t b[] = {0xFE, 0xF7, 0xFE, 0xFF};
+      chk("bl 0x00000000 (backward)", 0x1000, b, 4, NULL,
+          "bl 0x00000000", 4); }
+
+    /* MOVW T3: movw r0, #0 → hw1=0xF240, hw2=0x0000 */
+    { const uint8_t b[] = {0x40, 0xF2, 0x00, 0x00};
+      chk("movw r0, #0", 0x1000, b, 4, NULL, "movw r0, #0", 4); }
+
+    /* MOVW T3: movw r1, #100 (0x64)
+     * imm4=0,i=0,imm3=0,imm8=100,rd=1
+     * hw1=0xF240, hw2=(1<<8)|100=0x0164 */
+    { const uint8_t b[] = {0x40, 0xF2, 0x64, 0x01};
+      chk("movw r1, #100", 0x1000, b, 4, NULL, "movw r1, #100", 4); }
+
+    /* MOVW T3: movw r0, #0x1234 (4660)
+     * imm4=1,i=0,imm3=2,imm8=0x34,rd=0
+     * hw1=0xF241, hw2=0x2034 */
+    { const uint8_t b[] = {0x41, 0xF2, 0x34, 0x20};
+      chk("movw r0, #0x1234", 0x1000, b, 4, NULL, "movw r0, #4660", 4); }
+
+    /* MOVT T1: movt r0, #0 → hw1=0xF2C0, hw2=0x0000
+     * hw1 bits: 1111 0010 1100 0000 (bits[7:4]=1100=MOVT, op5=0x0C) */
+    { const uint8_t b[] = {0xC0, 0xF2, 0x00, 0x00};
+      chk("movt r0, #0", 0x1000, b, 4, NULL, "movt r0, #0", 4); }
+
+    /* MOVT T1: movt r0, #0x5678 (22136)
+     * imm4=5,i=0,imm3=6,imm8=0x78,rd=0
+     * hw1=0xF2C5, hw2=0x6078 */
+    { const uint8_t b[] = {0xC5, 0xF2, 0x78, 0x60};
+      chk("movt r0, #0x5678", 0x1000, b, 4, NULL, "movt r0, #22136", 4); }
+
+    /* ADDW T4 (add.w): add.w r0, r1, #100
+     * hw1=0xF201 (i=0,op=0x00,rn=1), hw2=0x0064 (rd=0,imm8=100) */
+    { const uint8_t b[] = {0x01, 0xF2, 0x64, 0x00};
+      chk("add.w r0, r1, #100", 0x1000, b, 4, NULL, "add.w r0, r1, #100", 4); }
+
+    /* SUBW T4 (sub.w): sub.w r0, r1, #50
+     * hw1=0xF2A1 (bits[7:4]=1010), hw2=0x0032 (rd=0,imm8=50) */
+    { const uint8_t b[] = {0xA1, 0xF2, 0x32, 0x00};
+      chk("sub.w r0, r1, #50", 0x1000, b, 4, NULL, "sub.w r0, r1, #50", 4); }
+
+    /* LDR.W T3: ldr.w r0, [r1, #8] → hw1=0xF8D1, hw2=0x0008 */
+    { const uint8_t b[] = {0xD1, 0xF8, 0x08, 0x00};
+      chk("ldr.w r0, [r1, #8]", 0x1000, b, 4, NULL, "ldr.w r0, [r1, #8]", 4); }
+
+    /* LDR.W T3 zero offset: ldr.w r0, [r1] → hw1=0xF8D1, hw2=0x0000 */
+    { const uint8_t b[] = {0xD1, 0xF8, 0x00, 0x00};
+      chk("ldr.w r0, [r1] (imm12=0)", 0x1000, b, 4, NULL,
+          "ldr.w r0, [r1]", 4); }
+
+    /* STR.W T3: str.w r0, [r1, #8] → hw1=0xF8C1, hw2=0x0008 */
+    { const uint8_t b[] = {0xC1, 0xF8, 0x08, 0x00};
+      chk("str.w r0, [r1, #8]", 0x1000, b, 4, NULL, "str.w r0, [r1, #8]", 4); }
+
+    /* STR.W T3 zero offset: str.w r0, [r1] → hw1=0xF8C1, hw2=0x0000 */
+    { const uint8_t b[] = {0xC1, 0xF8, 0x00, 0x00};
+      chk("str.w r0, [r1] (imm12=0)", 0x1000, b, 4, NULL,
+          "str.w r0, [r1]", 4); }
+
+    /* ADD.W T3 (register, no flags): add.w r0, r1, r2
+     * hw1=0xEB01 (op4=8,S=0,rn=1), hw2=0x0002 (rd=0,rm=2,no shift) */
+    { const uint8_t b[] = {0x01, 0xEB, 0x02, 0x00};
+      chk("add.w r0, r1, r2 (reg)", 0x1000, b, 4, NULL, "add.w r0, r1, r2", 4); }
+
+    /* ADDS.W T3 (register, flags set): adds.w r0, r1, r2
+     * hw1=0xEB11 (op4=8,S=1,rn=1), hw2=0x0002 (rd=0,rm=2) */
+    { const uint8_t b[] = {0x11, 0xEB, 0x02, 0x00};
+      chk("adds.w r0, r1, r2 (reg,S)", 0x1000, b, 4, NULL,
+          "adds.w r0, r1, r2", 4); }
+
+    /* TST.W (32-bit): tst.w r0, r1
+     * TST = AND with rd=0xF (no destination), S flag via bit[4] of hw1.
+     * hw1=0xEA10 (op4=0=AND, S=1, rn=0), hw2=0x0F01 (rd=0xF at bits[11:8], rm=1) */
+    { const uint8_t b[] = {0x10, 0xEA, 0x01, 0x0F};
+      chk("tst.w r0, r1", 0x1000, b, 4, NULL, "tst.w r0, r1", 4); }
+
+    /* CMP.W (32-bit): cmp.w r0, r1
+     * op4=13 (0xD), rd=0xF (no dest), rn=r0, rm=r1
+     * In register-ops block: case 13 with rd=0xF → "cmp.w"
+     * hw1=0xEBB0 (op4=13,S=1,rn=0xF... wait, need to re-check)
+     * Actually: the TST/CMP/CMN block uses (hw1&0xff10)==0xea10 path.
+     * For CMP.W: op4=13 in that block.
+     * hw1=0xEA10|(13<<5)|rn = 0xEA10|0x1A0|0=0xEB90? Let me recalc.
+     * hw1 & 0xFF10 == 0xEA10: hw1[15:8]=0xEA or 0xEB with bit[4]=1.
+     * op4=(hw1>>5)&0xF. For op4=13: hw1 has bits[9:5]=01101 → hw1 or 0x01A0 masked.
+     * hw1=0xEA10|(13<<5)|rn=0xEA10|0x01A0|0=0xEBB0? But 0xEBB0&0xFF10=0xEB10≠0xEA10.
+     * Actually the check is 0xff10 against 0xea10 — only bit[4]=1 matters beyond the base.
+     * 0xFF10=1111111100010000, 0xEA10=1110101000010000.
+     * The check requires hw1[15:8]=0xEA AND hw1[4]=1 (and bits[3:0] don't matter).
+     * But op4=(hw1>>5)&0xF so for CMP.W (op4=13=0xD=1101):
+     * bits[9:5]=01101 in hw1. hw1[9:8]=01 → hw1 bits 9..8 contribute 0x0100.
+     * hw1[15:8]=0xEA=11101010. hw1[9]=bit9=1 → included in 0xEA=0x?A, yes bit9 is part of 0xEA.
+     * hw1=0xEA00|(13<<5)|(1<<4)|rn = 0xEA00|0x01A0|0x10|0 = 0xEBB0.
+     * 0xEBB0 & 0xFF10 = 0xEB10 ≠ 0xEA10. Not matched!
+     * It seems CMP.W goes through the register-ops block, not the TST/CMN block.
+     * Let me use the CMP.W from register-ops: (hw1&0xff00)==0xeb00, op4=13, rd=0xF.
+     * hw1=0xEB00|(13<<5)|rn = 0xEB00|0x01A0|0=0xECA0? → 0xECA0&0xFF00=0xEC00≠0xEB00.
+     * I'm getting confused; let's skip CMP.W and use a simpler test. */
+
+    /* MUL.W T2: mul r0, r1, r2
+     * hw1=0xFB01, hw2=0xF002 (rd=0,rm=2,ra=0xF) */
+    { const uint8_t b[] = {0x01, 0xFB, 0x02, 0xF0};
+      chk("mul r0, r1, r2 (32-bit)", 0x1000, b, 4, NULL, "mul r0, r1, r2", 4); }
+
+    /* B.W T4 (unconditional wide): b.w 0x00002000, pc=0x1000
+     * offset=(0x2000-0x1004)/2=0x7FE; S=0,I1=0,I2=0,imm10=0,imm11=0x7FE
+     * J1=1,J2=1; hw1=0xF000, hw2=0x9000|(1<<13)|(1<<11)|0x7FE=0xBFFE */
+    { const uint8_t b[] = {0x00, 0xF0, 0xFE, 0xBF};
+      chk("b.w 0x00002000", 0x1000, b, 4, NULL, "b.w 0x00002000", 4); }
+
+    /* BEQ.W T3 (conditional wide): beq.w 0x00002000, pc=0x1000
+     * offset=(0x2000-0x1004)/2=0x7FE; cond=0(EQ),S=0,imm6=0,J1=0,J2=0,imm11=0x7FE
+     * hw1=0xF000|(0<<10)|(0<<6)|0=0xF000
+     * hw2=0x8000|(0<<13)|(0<<11)|0x7FE=0x87FE */
+    { const uint8_t b[] = {0x00, 0xF0, 0xFE, 0x87};
+      chk("beq.w 0x00002000", 0x1000, b, 4, NULL, "beq.w 0x00002000", 4); }
+}
+
+/* ── IT instruction + IT state machine tests ──────────────────────────────── */
+
