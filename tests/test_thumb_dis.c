@@ -417,3 +417,183 @@ static void test_32bit(void)
 
 /* ── IT instruction + IT state machine tests ──────────────────────────────── */
 
+static void test_it(void)
+{
+    printf("\n--- IT block ---\n");
+
+    /* IT EQ (single slot): "it eq" → hw=0xBF08 (firstcond=0,mask=0x8) */
+    { const uint8_t b[] = {0x08, 0xBF};
+      uint8_t its = 0;
+      chk("it eq (instruction)", 0x1000, b, 2, &its, "it eq", 2);
+      CHECK(its == 0x08, "it eq: itstate = 0x08 after"); }
+
+    /* ITT EQ (two T slots): "itt eq" → hw=0xBF04 (mask=0x4) */
+    { const uint8_t b[] = {0x04, 0xBF};
+      uint8_t its = 0;
+      chk("itt eq (instruction)", 0x1000, b, 2, &its, "itt eq", 2);
+      CHECK(its == 0x04, "itt eq: itstate = 0x04 after"); }
+
+    /* ITE EQ (T then E): "ite eq" → hw=0xBF0C (firstcond=0,mask=0xC)
+     * Verify: mask=0xC=1100; trailing_pos=2; n_extra=1
+     * k=0: te_bit=(0xC>>3)&1=1; firstcond&1=0; 1≠0 → 'e'
+     * → "ite" */
+    { const uint8_t b[] = {0x0C, 0xBF};
+      uint8_t its = 0;
+      chk("ite eq (instruction)", 0x1000, b, 2, &its, "ite eq", 2);
+      CHECK(its == 0x0C, "ite eq: itstate = 0x0C after"); }
+
+    /* ITTEE EQ (T,T,E,E): "ittee eq" → hw=0xBF07 (mask=0x7)
+     * mask=7=0111; trailing_pos=0; n_extra=3
+     * k=0: (7>>3)&1=0==0→'t'; k=1: (7>>2)&1=1≠0→'e'; k=2: (7>>1)&1=1≠0→'e'
+     * → "ittee" ✓ */
+    { const uint8_t b[] = {0x07, 0xBF};
+      uint8_t its = 0;
+      chk("ittee eq (instruction)", 0x1000, b, 2, &its, "ittee eq", 2);
+      CHECK(its == 0x07, "ittee eq: itstate = 0x07 after"); }
+
+    /* ITTEE EQ — full 4-instruction walk-through.
+     * Start with itstate=0x07, inject 4 x "movs rN, #N" and verify:
+     *   slot1 (T=EQ): "movseq r0, #1"  itstate→0x0E
+     *   slot2 (T=EQ): "movseq r1, #2"  itstate→0x1C
+     *   slot3 (E=NE): "movsne r2, #3"  itstate→0x18
+     *   slot4 (E=NE): "movsne r3, #4"  itstate→0x00  */
+    {
+        uint8_t its = 0x07;
+
+        const uint8_t b1[] = {0x01, 0x20}; /* movs r0, #1 */
+        chk("ittee slot1 (T=EQ)", 0x1000, b1, 2, &its, "movseq r0, #1", 2);
+        CHECK(its == 0x0E, "ittee after slot1: itstate=0x0E");
+
+        const uint8_t b2[] = {0x02, 0x21}; /* movs r1, #2 */
+        chk("ittee slot2 (T=EQ)", 0x1000, b2, 2, &its, "movseq r1, #2", 2);
+        CHECK(its == 0x1C, "ittee after slot2: itstate=0x1C");
+
+        const uint8_t b3[] = {0x03, 0x22}; /* movs r2, #3 */
+        chk("ittee slot3 (E=NE)", 0x1000, b3, 2, &its, "movsne r2, #3", 2);
+        CHECK(its == 0x18, "ittee after slot3: itstate=0x18");
+
+        const uint8_t b4[] = {0x04, 0x23}; /* movs r3, #4 */
+        chk("ittee slot4 (E=NE)", 0x1000, b4, 2, &its, "movsne r3, #4", 2);
+        CHECK(its == 0x00, "ittee after slot4: itstate=0x00 (block done)");
+        CHECK((its & 0x0f) == 0, "ittee block exit: (itstate&0x0f)==0");
+    }
+
+    /* ITE NE — firstcond=1 (NE, low bit=1)
+     * For ITE NE: slot2=E means bit≠firstcond[0]=1, so mask bit=0.
+     * mask=0:1:0:0=0x4 (E-bit at [3]=0, trailing-1 at [2]).
+     * hw=0xBF14 (firstcond=1, mask=0x4)
+     * slot1 (T=NE): condition=NE; slot2 (E=EQ): condition=EQ */
+    {
+        const uint8_t bi[] = {0x14, 0xBF};
+        uint8_t its = 0;
+        chk("ite ne (instruction)", 0x1000, bi, 2, &its, "ite ne", 2);
+        CHECK(its == 0x14, "ite ne: itstate=0x14");
+
+        const uint8_t b1[] = {0x01, 0x20}; /* movs r0, #1 */
+        chk("ite ne slot1 (T=NE)", 0x1000, b1, 2, &its, "movsne r0, #1", 2);
+        CHECK(its == 0x08, "ite ne after slot1: itstate=0x08");
+
+        const uint8_t b2[] = {0x02, 0x21}; /* movs r1, #2 */
+        chk("ite ne slot2 (E=EQ)", 0x1000, b2, 2, &its, "movseq r1, #2", 2);
+        CHECK(its == 0x00, "ite ne after slot2: itstate=0x00");
+    }
+
+    /* itstate=NULL degraded mode: condition suffix omitted */
+    {
+        const uint8_t b[] = {0x07, 0xBF}; /* ittee eq */
+        chk("ittee eq (itstate=NULL)", 0x1000, b, 2, NULL, "ittee eq", 2);
+
+        /* Instruction with itstate=NULL: no suffix added */
+        const uint8_t bm[] = {0x01, 0x20}; /* movs r0, #1 */
+        chk("movs no suffix (itstate=NULL)", 0x1000, bm, 2, NULL, "movs r0, #1", 2);
+    }
+}
+
+/* ── edge cases ───────────────────────────────────────────────────────────── */
+
+static void test_edge(void)
+{
+    printf("\n--- edge cases ---\n");
+
+    /* buf_len = 0 → -1 */
+    { char out[THUMB_DIS_OUT_MAX];
+      int r = thumb_dis_one(0x1000, (const uint8_t *)"x", 0, out, sizeof(out), NULL);
+      CHECK(r == -1, "buf_len=0 returns -1"); }
+
+    /* buf_len = 1 → -1 */
+    { const uint8_t b[] = {0x70};
+      char out[THUMB_DIS_OUT_MAX];
+      int r = thumb_dis_one(0x1000, b, 1, out, sizeof(out), NULL);
+      CHECK(r == -1, "buf_len=1 returns -1"); }
+
+    /* buf_len = 2 for 32-bit prefix → -2 */
+    { const uint8_t b[] = {0x00, 0xF0}; /* hw1=0xF000, top5=0x1E → 32-bit */
+      char out[THUMB_DIS_OUT_MAX];
+      int r = thumb_dis_one(0x1000, b, 2, out, sizeof(out), NULL);
+      CHECK(r == -2, "buf_len=2 for 32-bit prefix returns -2"); }
+
+    /* Unknown 16-bit encoding: hw=0xB600 (no decoder matches) */
+    { const uint8_t b[] = {0x00, 0xB6};
+      chk("unknown 16-bit 0xb600", 0x1000, b, 2, NULL, "<unknown 0xb600>", 2); }
+
+    /* PC bit[0] masking: raw PC=0x1001 (Thumb bit set), should behave like pc=0x1000
+     * BEQ with off8=0, pc=0x1001 → internally masked to 0x1000 → dest=0x1004 */
+    { const uint8_t b[] = {0x00, 0xD0};
+      chk("pc bit[0] masking", 0x1001, b, 2, NULL, "beq 0x00001004", 2); }
+
+    /* LDR literal PC-relative: pc=0x1001 (Thumb bit), addr should use pc&~1=0x1000
+     * ldr r0, [pc, #0]: addr = (0x1000&~3)+4+0 = 0x1004 */
+    { const uint8_t b[] = {0x00, 0x48};
+      chk("ldr literal pc bit[0] mask", 0x1001, b, 2, NULL,
+          "ldr r0, [pc, #0]  ; 0x00001004", 2); }
+
+    /* PC=0x2 (word-aligned check): ldr r0, [pc, #0]
+     * pc&~1=0x2, pc&~3=0x0, addr=0+4+0=0x4 */
+    { const uint8_t b[] = {0x00, 0x48};
+      chk("ldr literal pc=0x2 align", 0x2, b, 2, NULL,
+          "ldr r0, [pc, #0]  ; 0x00000004", 2); }
+
+    /* out_sz=0 should not crash (returns -1) */
+    { const uint8_t b[] = {0x70, 0x47};
+      char out[4] = "xxx";
+      int r = thumb_dis_one(0x1000, b, 2, out, 0, NULL);
+      CHECK(r == -1, "out_sz=0 returns -1"); }
+}
+
+/* ── PC-relative arithmetic tests ────────────────────────────────────────── */
+
+static void test_pc_relative(void)
+{
+    printf("\n--- PC-relative addressing ---\n");
+
+    /* B T2: off11=+4 → dest = pc+4+8 = 0x1000+4+8 = 0x100C
+     * off11=4, hw=0xE004 */
+    { const uint8_t b[] = {0x04, 0xE0};
+      chk("b +8 from 0x1000 → 0x100c", 0x1000, b, 2, NULL,
+          "b 0x0000100c", 2); }
+
+    /* B T2: off11=-2 → dest = pc+4+(-2*2) = 0x1000
+     * -2 as 11-bit = 0x7FE; hw = 0xE000|0x7FE = 0xE7FE */
+    { const uint8_t b[] = {0xFE, 0xE7};
+      chk("b -4 from 0x1000 → 0x1000", 0x1000, b, 2, NULL,
+          "b 0x00001000", 2); }
+
+    /* ADR with imm8=1: addr = (0x1000&~3)+4+4 = 0x1008 */
+    { const uint8_t b[] = {0x01, 0xA0};
+      chk("adr r0, 0x1008 (imm8=1)", 0x1000, b, 2, NULL,
+          "adr r0, 0x00001008", 2); }
+}
+
+/* ── main ─────────────────────────────────────────────────────────────────── */
+
+int main(void)
+{
+    test_16bit();
+    test_32bit();
+    test_it();
+    test_edge();
+    test_pc_relative();
+
+    printf("\n%d/%d passed\n", s_pass, s_run);
+    return (s_pass == s_run) ? 0 : 1;
+}
